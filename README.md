@@ -25,8 +25,14 @@ pip install -r requirements.txt
    - [GeoLite2 ASN](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)
    
    Place the `.mmdb` files in the same directory as the script.
+   
+3. If you don't use MaxMind, the script defaults to a combination of a simple local database and API calls for new IP's which are then cached.
 
 ## Usage
+
+The simplest way to startup and check for dependencies is with either .\run_monitor.bat or ./run_monitor.sh 
+
+Otherwise just manually run the monitor with python and change any non-default options you like.
 
 ### Live Monitoring
 \`\`\`bash

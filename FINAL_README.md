@@ -56,6 +56,49 @@ python scripts/network_monitor.py --no-online
 python scripts/network_monitor.py --interval 10
 \`\`\`
 
+## 🧠 Smart Caching & Rate Limiting
+
+### **Intelligent Geo Lookup Caching**
+- **Persistent cache**: Geo lookups are saved to disk and reused across sessions
+- **7-day cache lifetime**: Entries automatically expire after a week
+- **Rate limiting**: Online API calls are throttled to prevent rate limiting
+- **Cache statistics**: View cache performance and contents
+
+### **Cache File Location**
+- **Consistent location**: Cache is always stored in `scripts/geo_cache.pkl`
+- **Works from anywhere**: Whether you run from root directory or scripts folder
+- **Migration tool**: Use `python scripts/test_cache_location.py migrate` to move old cache files
+
+### **Cache Management**
+\`\`\`bash
+# View cache statistics
+python scripts/cache_manager.py stats
+
+# Clean old cache entries  
+python scripts/cache_manager.py clean
+
+# Clear entire cache
+python scripts/cache_manager.py clear
+
+# Test cache location consistency
+python scripts/test_cache_location.py
+\`\`\`
+
+### **Location Detection Methods**
+The script shows how your location was determined:
+- **Auto-detected**: Found via your public IP address
+- **Manually set**: Specified with `--country` option  
+- **Default**: Fallback when auto-detection fails
+
+### **Geo Source Indicators**
+The display shows which geo lookup methods are active:
+- **MM**: MaxMind GeoLite2 databases
+- **DB**: Built-in database
+- **API**: Online APIs
+- **Cache**: Number of cached entries
+
+Example: `🗺️ Geo sources: MM + DB + API | Cache: 247 entries`
+
 ## 🧪 Testing
 
 ### Test All Features
@@ -139,7 +182,9 @@ network-monitor/
 │   ├── simple_geo_db.py        # Built-in geo database
 │   ├── test_all_geo.py         # Comprehensive tests
 │   ├── test_basic.py           # Basic functionality test
-│   └── download_geolite2.py    # MaxMind setup guide
+│   ├── download_geolite2.py    # MaxMind setup guide
+│   ├── cache_manager.py        # Cache management
+│   └── test_cache_location.py  # Cache location consistency test
 ├── run_monitor.bat             # Windows launcher
 ├── run_monitor.sh              # Unix launcher
 ├── requirements.txt            # Python dependencies

@@ -17,6 +17,9 @@ from dataclasses import dataclass
 from enum import Enum
 import json
 import re
+import logging
+import pickle
+from datetime import datetime, timedelta
 
 # Import our simple geo database
 try:
@@ -128,18 +131,20 @@ class NetworkConnection:
 class CountryDetector:
     """Detects the user's country automatically"""
     
-    def __init__(self, geoip_lookup=None, default_country: str = "United States"):
+    def __init__(self, geoip_lookup=None, default_country: str = "United States", logger=None):
         self.geoip_lookup = geoip_lookup
         self.default_country = default_country
         self.detected_country = None
         self.public_ip = None
+        self.detection_method = None  # Track how country was determined
+        self.logger = logger or logging.getLogger(__name__)
     
     def detect_country(self) -> str:
         """Auto-detect user's country with fallback to default"""
         if self.detected_country:
             return self.detected_country
             
-        print("Auto-detecting your location...")
+        print("🌍 Auto-detecting your location...")
         
         try:
             # Method 1: Get public IP and look it up
@@ -149,22 +154,43 @@ class CountryDetector:
                 if country and country not in ['Unknown', 'Local Network', 'Private', 'Europe', 'Asia']:
                     self.detected_country = country
                     self.public_ip = public_ip
-                    print(f"Detected location: {country} (IP: {public_ip})")
+                    self.detection_method = "auto-detected"
+                    print(f"✓ Auto-detected location: {country} (IP: {public_ip})")
                     return country
             
             # Method 2: Use online service to detect country directly
             country = self._get_country_online()
             if country and country not in ['Unknown', 'Local Network', 'Private', 'Europe', 'Asia']:
                 self.detected_country = country
-                print(f"Detected location: {country}")
+                self.detection_method = "auto-detected"
+                print(f"✓ Auto-detected location: {country}")
                 return country
         except Exception as e:
-            print(f"Error during location detection: {e}")
+            self.logger.error(f"Error during location detection: {e}")
         
         # Fallback to default country
-        print(f"Could not auto-detect location, using default: {self.default_country}")
+        print(f"⚠ Could not auto-detect location, using default: {self.default_country}")
         self.detected_country = self.default_country
+        self.detection_method = "default"
         return self.default_country
+    
+    def set_manual_country(self, country: str):
+        """Set country manually (overrides auto-detection)"""
+        self.detected_country = country
+        self.detection_method = "manual"
+    
+    def get_location_info(self) -> str:
+        """Get formatted location information with detection method"""
+        if not self.detected_country:
+            return "Unknown location"
+        
+        method_text = {
+            "auto-detected": "auto-detected",
+            "manual": "manually set", 
+            "default": "default"
+        }.get(self.detection_method, "unknown")
+        
+        return f"{self.detected_country} ({method_text})"
     
     def _get_public_ip(self) -> Optional[str]:
         """Get user's public IP address"""
@@ -188,6 +214,7 @@ class CountryDetector:
                     if re.match(r'^(\d{1,3}\.){3}\d{1,3}$', ip):
                         return ip
             except Exception as e:
+                self.logger.debug(f"Failed to get IP from {service}: {e}")
                 continue
         
         return None
@@ -211,21 +238,30 @@ class CountryDetector:
                     if country and len(country) > 2:  # Avoid country codes, get full names
                         return country
             except Exception as e:
+                self.logger.debug(f"Failed to get country from {url}: {e}")
                 continue
                 
         return None
 
 
 class GeoIPLookup:
-    """Handles geographic lookups with multiple fallback methods"""
+    """Handles geographic lookups with multiple fallback methods and intelligent caching"""
     
     def __init__(self, city_db_path: str = "./GeoLite2-City.mmdb", 
-                 asn_db_path: str = "./GeoLite2-ASN.mmdb", use_online: bool = True):
+                 asn_db_path: str = "./GeoLite2-ASN.mmdb", use_online: bool = True, logger=None):
         self.city_reader = None
         self.asn_reader = None
         self.use_online = use_online
-        self.online_cache = {}  # Simple cache for online lookups
+        self.online_cache = {}  # Runtime cache
+        self.persistent_cache = {}  # Disk-backed cache
+        # Always store cache in the same directory as the script
+        script_dir = Path(__file__).parent
+        self.cache_file = script_dir / "geo_cache.pkl"
         self.simple_db = None
+        self.logger = logger or logging.getLogger(__name__)
+        self.last_online_lookup = {}  # Rate limiting tracker
+        self.online_lookup_delay = 1.0  # Minimum seconds between online lookups
+        self.methods_used = []  # Track which methods are available
         
         # Country code to name mapping
         self.country_codes = {
@@ -245,12 +281,46 @@ class GeoIPLookup:
             'ID': 'Indonesia', 'TW': 'Taiwan', 'HK': 'Hong Kong'
         }
         
+        # Load persistent cache
+        self._load_cache()
+        
         # Initialize lookup methods in order of preference
         self._init_lookup_methods(city_db_path, asn_db_path, use_online)
     
+    def _load_cache(self):
+        """Load persistent cache from disk"""
+        try:
+            if Path(self.cache_file).exists():
+                with open(self.cache_file, 'rb') as f:
+                    cache_data = pickle.load(f)
+                    self.persistent_cache = cache_data.get('cache', {})
+                    # Clean old entries (older than 7 days)
+                    cutoff = datetime.now() - timedelta(days=7)
+                    self.persistent_cache = {
+                        ip: data for ip, data in self.persistent_cache.items()
+                        if data.get('timestamp', datetime.now()) > cutoff
+                    }
+                    self.logger.debug(f"Loaded {len(self.persistent_cache)} cached geo entries")
+        except Exception as e:
+            self.logger.error(f"Error loading geo cache: {e}")
+            self.persistent_cache = {}
+    
+    def _save_cache(self):
+        """Save persistent cache to disk"""
+        try:
+            cache_data = {
+                'cache': self.persistent_cache,
+                'saved_at': datetime.now()
+            }
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(cache_data, f)
+            self.logger.debug(f"Saved {len(self.persistent_cache)} geo entries to cache")
+        except Exception as e:
+            self.logger.error(f"Error saving geo cache: {e}")
+    
     def _init_lookup_methods(self, city_db_path: str, asn_db_path: str, use_online: bool):
         """Initialize lookup methods in order of preference"""
-        methods_available = []
+        self.methods_used = []
         
         # Method 1: Try MaxMind GeoIP databases (most accurate)
         if GEOIP_AVAILABLE:
@@ -258,41 +328,67 @@ class GeoIPLookup:
                 if Path(city_db_path).exists() and Path(asn_db_path).exists():
                     self.city_reader = geoip2.database.Reader(city_db_path)
                     self.asn_reader = geoip2.database.Reader(asn_db_path)
-                    methods_available.append("MaxMind GeoLite2 databases")
-                    print(f"✓ Using MaxMind GeoLite2 databases")
+                    self.methods_used.append("MaxMind")
+                    print("✓ Using MaxMind GeoLite2 databases")
                 else:
-                    print(f"✗ MaxMind databases not found: {city_db_path}, {asn_db_path}")
+                    self.logger.debug(f"MaxMind databases not found: {city_db_path}, {asn_db_path}")
             except Exception as e:
-                print(f"Error initializing MaxMind databases: {e}")
+                self.logger.error(f"Error initializing MaxMind databases: {e}")
         
         # Method 2: Simple built-in database (good coverage for major services)
         if SIMPLE_GEO_AVAILABLE:
             try:
                 self.simple_db = SimpleGeoDatabase()
-                methods_available.append("Simple built-in database")
-                print("✓ Using simple built-in geo database")
+                self.methods_used.append("Built-in")
+                if not self.methods_used or "MaxMind" not in self.methods_used:
+                    print("✓ Using built-in geo database")
             except Exception as e:
-                print(f"Error initializing simple database: {e}")
+                self.logger.error(f"Error initializing simple database: {e}")
         
         # Method 3: Online APIs (requires internet)
         if REQUESTS_AVAILABLE and use_online:
-            methods_available.append("Online APIs")
-            print("✓ Online geo lookup available")
+            self.methods_used.append("Online")
+            if len(self.methods_used) == 1:
+                print("✓ Using online geo lookup")
         
         # Report available methods
-        if methods_available:
-            print(f"Geo lookup methods available: {', '.join(methods_available)}")
+        if self.methods_used:
+            self.logger.info(f"Geo lookup methods: {', '.join(self.methods_used)}")
         else:
-            print("⚠ No geo lookup methods available - will show basic info only")
+            print("⚠ Limited geo lookup available")
+    
+    def get_methods_summary(self) -> str:
+        """Get a summary of available lookup methods"""
+        if not self.methods_used:
+            return "No geo lookup"
+        
+        method_map = {
+            "MaxMind": "MM",
+            "Built-in": "DB", 
+            "Online": "API"
+        }
+        
+        short_methods = [method_map.get(method, method) for method in self.methods_used]
+        return " + ".join(short_methods)
     
     def lookup(self, ip_address: str) -> Tuple[str, str, str]:
-        """Lookup geographic and ASN information for an IP address"""
+        """Lookup geographic and ASN information for an IP address with intelligent caching"""
         if not ip_address or ip_address in ['0.0.0.0', '127.0.0.1', '::1', '*', '0.0.0.0:0']:
             return "", "", ""
         
         # Skip private IP ranges
         if self._is_private_ip(ip_address):
             return "", "Private", "Local Network"
+        
+        # Check persistent cache first
+        if ip_address in self.persistent_cache:
+            cached_data = self.persistent_cache[ip_address]
+            self.logger.debug(f"Cache hit for {ip_address}")
+            return cached_data['city'], cached_data['country'], cached_data['asn']
+        
+        # Check runtime cache
+        if ip_address in self.online_cache:
+            return self.online_cache[ip_address]
         
         # Method 1: Try MaxMind databases first (most accurate)
         if self.city_reader and self.asn_reader:
@@ -304,32 +400,71 @@ class GeoIPLookup:
                 asn_response = self.asn_reader.asn(ip_address)
                 asn = asn_response.autonomous_system_organization or ""
                 
-                if country:  # If we got good data, return it
+                if country:  # If we got good data, cache and return it
+                    self._cache_result(ip_address, city, country, asn)
+                    self.logger.debug(f"MaxMind lookup {ip_address}: {city}, {country}, {asn}")
                     return city, country, asn
                     
             except (geoip2.errors.AddressNotFoundError, geoip2.errors.GeoIP2Error):
+                self.logger.debug(f"IP {ip_address} not found in MaxMind databases")
                 pass  # Fall through to next method
             except Exception as e:
-                print(f"Error in MaxMind lookup for {ip_address}: {e}")
+                self.logger.error(f"Error in MaxMind lookup for {ip_address}: {e}")
         
         # Method 2: Try simple built-in database
         if self.simple_db:
             try:
                 city, country, asn = self.simple_db.lookup(ip_address)
                 if country and country != "Unknown":
+                    self._cache_result(ip_address, city, country, asn)
+                    self.logger.debug(f"Simple DB lookup {ip_address}: {city}, {country}, {asn}")
                     return city, country, asn
             except Exception as e:
-                print(f"Error in simple database lookup for {ip_address}: {e}")
+                self.logger.error(f"Error in simple database lookup for {ip_address}: {e}")
         
-        # Method 3: Try online APIs
+        # Method 3: Try online APIs (with rate limiting)
         if REQUESTS_AVAILABLE and self.use_online:
             try:
-                return self._online_lookup(ip_address)
+                # Rate limiting check
+                now = datetime.now()
+                if ip_address in self.last_online_lookup:
+                    time_since_last = (now - self.last_online_lookup[ip_address]).total_seconds()
+                    if time_since_last < self.online_lookup_delay:
+                        self.logger.debug(f"Rate limiting online lookup for {ip_address}")
+                        return "", "Unknown", ""
+                
+                result = self._online_lookup(ip_address)
+                self.last_online_lookup[ip_address] = now
+                
+                if result[1] != "Unknown":
+                    self._cache_result(ip_address, result[0], result[1], result[2])
+                    self.logger.debug(f"Online lookup {ip_address}: {result}")
+                    return result
             except Exception as e:
-                print(f"Error in online lookup for {ip_address}: {e}")
+                self.logger.error(f"Error in online lookup for {ip_address}: {e}")
         
         # Method 4: Last resort - return unknown
+        self.logger.debug(f"No geo data found for {ip_address}")
         return "", "Unknown", ""
+    
+    def _cache_result(self, ip_address: str, city: str, country: str, asn: str):
+        """Cache a lookup result both in memory and persistently"""
+        result_data = {
+            'city': city,
+            'country': country, 
+            'asn': asn,
+            'timestamp': datetime.now()
+        }
+        
+        # Cache in memory
+        self.online_cache[ip_address] = (city, country, asn)
+        
+        # Cache persistently
+        self.persistent_cache[ip_address] = result_data
+        
+        # Periodically save cache (every 10 entries)
+        if len(self.persistent_cache) % 10 == 0:
+            self._save_cache()
     
     def _is_private_ip(self, ip: str) -> bool:
         """Check if IP is in private ranges"""
@@ -359,9 +494,6 @@ class GeoIPLookup:
     
     def _online_lookup(self, ip_address: str) -> Tuple[str, str, str]:
         """Use free online API for geo lookup"""
-        if ip_address in self.online_cache:
-            return self.online_cache[ip_address]
-        
         # Try ip-api.com first
         try:
             response = requests.get(
@@ -378,11 +510,9 @@ class GeoIPLookup:
                     # Clean up ASN info
                     asn_info = self._clean_asn(asn_info)
                     
-                    result = (city, country, asn_info)
-                    self.online_cache[ip_address] = result
-                    return result
+                    return (city, country, asn_info)
         except Exception as e:
-            pass
+            self.logger.debug(f"ip-api.com failed for {ip_address}: {e}")
         
         # Try ipinfo.io as backup
         try:
@@ -400,11 +530,9 @@ class GeoIPLookup:
                 # Clean up ASN info
                 asn_info = self._clean_asn(asn_info)
                 
-                result = (city, country, asn_info)
-                self.online_cache[ip_address] = result
-                return result
+                return (city, country, asn_info)
         except Exception as e:
-            pass
+            self.logger.debug(f"ipinfo.io failed for {ip_address}: {e}")
         
         return "", "Unknown", ""
     
@@ -425,7 +553,8 @@ class GeoIPLookup:
         return asn_info.strip()
     
     def close(self):
-        """Close database connections"""
+        """Close database connections and save cache"""
+        self._save_cache()
         if self.city_reader:
             self.city_reader.close()
         if self.asn_reader:
@@ -435,9 +564,10 @@ class GeoIPLookup:
 class CrossPlatformNetstat:
     """Handles netstat across different operating systems"""
     
-    def __init__(self):
+    def __init__(self, logger=None):
         self.os_type = self._detect_os()
-        print(f"Detected OS: {self.os_type.value}")
+        self.logger = logger or logging.getLogger(__name__)
+        self.logger.info(f"Detected OS: {self.os_type.value}")
     
     def _detect_os(self) -> OSType:
         """Detect the operating system"""
@@ -453,14 +583,14 @@ class CrossPlatformNetstat:
     
     def get_connections(self, protocol: ConnectionType, filter_listening: bool = True) -> List[NetworkConnection]:
         """Get network connections for the current OS"""
-        print(f"Getting {protocol.value.upper()} connections...")
+        self.logger.debug(f"Getting {protocol.value.upper()} connections...")
         try:
             if self.os_type == OSType.WINDOWS:
                 return self._get_windows_connections(protocol, filter_listening)
             else:
                 return self._get_unix_connections(protocol, filter_listening)
         except Exception as e:
-            print(f"Error getting {protocol.value} connections: {e}")
+            self.logger.error(f"Error getting {protocol.value} connections: {e}")
             return []
     
     def _get_windows_connections(self, protocol: ConnectionType, filter_listening: bool = True) -> List[NetworkConnection]:
@@ -469,9 +599,11 @@ class CrossPlatformNetstat:
         
         try:
             cmd = ['netstat', '-ano', '-p', protocol.value]
+            self.logger.debug(f"Running command: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             
             lines = result.stdout.splitlines()
+            self.logger.debug(f"Got {len(lines)} lines from netstat")
             
             # Skip header lines - Windows format
             data_lines = []
@@ -481,6 +613,8 @@ class CrossPlatformNetstat:
                     # Check if line starts with TCP or UDP
                     if line.startswith(('TCP', 'UDP')):
                         data_lines.append(line)
+            
+            self.logger.debug(f"Found {len(data_lines)} data lines")
             
             for line in data_lines:
                 parts = line.split()
@@ -520,10 +654,11 @@ class CrossPlatformNetstat:
                         connections.append(conn)
                         
         except subprocess.CalledProcessError as e:
-            print(f"Error running Windows netstat: {e}")
+            self.logger.error(f"Error running Windows netstat: {e}")
         except Exception as e:
-            print(f"Error parsing Windows netstat output: {e}")
+            self.logger.error(f"Error parsing Windows netstat output: {e}")
             
+        self.logger.debug(f"Returning {len(connections)} {protocol.value} connections")
         return connections
     
     def _get_unix_connections(self, protocol: ConnectionType, filter_listening: bool = True) -> List[NetworkConnection]:
@@ -579,9 +714,9 @@ class CrossPlatformNetstat:
                         connections.append(conn)
                         
         except subprocess.CalledProcessError as e:
-            print(f"Error running Unix netstat: {e}")
+            self.logger.error(f"Error running Unix netstat: {e}")
         except Exception as e:
-            print(f"Error parsing Unix netstat output: {e}")
+            self.logger.error(f"Error parsing Unix netstat output: {e}")
             
         return connections
 
@@ -589,19 +724,20 @@ class CrossPlatformNetstat:
 class NetworkMonitor:
     """Main network monitoring class with cross-platform support"""
     
-    def __init__(self, geoip_lookup: GeoIPLookup, default_country: str = "United States"):
+    def __init__(self, geoip_lookup: GeoIPLookup, default_country: str = "United States", logger=None):
         self.geoip = geoip_lookup
         self.console = Console() if RICH_AVAILABLE else None
-        self.netstat = CrossPlatformNetstat()
-        self.country_detector = CountryDetector(geoip_lookup, default_country)
+        self.netstat = CrossPlatformNetstat(logger)
+        self.country_detector = CountryDetector(geoip_lookup, default_country, logger)
         self.local_country = None
+        self.logger = logger or logging.getLogger(__name__)
     
     def initialize(self):
         """Initialize the monitor and detect local country"""
         try:
             self.local_country = self.country_detector.detect_country()
         except Exception as e:
-            print(f"Error during initialization: {e}")
+            self.logger.error(f"Error during initialization: {e}")
             self.local_country = "United States"  # Fallback
     
     def get_netstat_connections(self, filter_listening: bool = True) -> List[NetworkConnection]:
@@ -617,7 +753,7 @@ class NetworkMonitor:
             udp_connections = self.netstat.get_connections(ConnectionType.UDP, filter_listening)
             connections.extend(udp_connections)
             
-            print(f"Total connections before geo lookup: {len(connections)}")
+            self.logger.info(f"Found {len(connections)} connections before geo lookup")
             
             # Add geographic information
             for i, conn in enumerate(connections):
@@ -626,21 +762,15 @@ class NetworkMonitor:
                     conn.city = city
                     conn.country = country
                     conn.asn = asn
-                    
-                    # Debug first few lookups
-                    if i < 5:
-                        print(f"Lookup {i+1}: {conn.foreign_ip} -> {city}, {country}, {asn}")
                         
                 except Exception as e:
-                    print(f"Error in geo lookup for {conn.foreign_ip}: {e}")
+                    self.logger.error(f"Error in geo lookup for {conn.foreign_ip}: {e}")
                     conn.city = ""
                     conn.country = "Lookup Error"
                     conn.asn = "Lookup Error"
             
         except Exception as e:
-            print(f"Error getting connections: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.error(f"Error getting connections: {e}")
         
         return connections
     
@@ -679,14 +809,21 @@ class NetworkMonitor:
                 style=style
             )
         
-        # Add summary
+        # Enhanced summary with location and geo source info
         total = len(connections)
         foreign = sum(1 for conn in connections if conn.is_foreign(self.local_country))
         established = sum(1 for conn in connections if conn.is_established())
         
-        self.console.print(f"\nSummary: {total} connections ({established} established), {foreign} foreign, {total-foreign} domestic")
-        if self.local_country:
-            self.console.print(f"Your location: {self.local_country}")
+        self.console.print(f"\n📊 Summary: {total} connections ({established} established), {foreign} foreign, {total-foreign} domestic")
+        
+        # Show location info with detection method
+        location_info = self.country_detector.get_location_info()
+        self.console.print(f"🏠 Your location: {location_info}")
+        
+        # Show geo lookup methods being used
+        geo_methods = self.geoip.get_methods_summary()
+        cache_size = len(self.geoip.persistent_cache)
+        self.console.print(f"🗺️  Geo sources: {geo_methods} | Cache: {cache_size} entries")
         
         self.console.print(table)
     
@@ -715,21 +852,34 @@ class NetworkMonitor:
             print(f"{marker} {conn.protocol:<4} {conn.local_address:<{max_local}} {conn.foreign_address:<{max_remote}} "
                   f"{conn.state:<11} {conn.pid:<6} {conn.city:<{max_city}} {conn.country:<{max_country}} {conn.asn}")
         
-        # Summary
+        # Enhanced summary
         total = len(connections)
         foreign = sum(1 for conn in connections if conn.is_foreign(self.local_country))
         established = sum(1 for conn in connections if conn.is_established())
-        print(f"\nSummary: {total} connections ({established} established), {foreign} foreign, {total-foreign} domestic")
-        if self.local_country:
-            print(f"Your location: {self.local_country}")
+        
+        print(f"\n📊 Summary: {total} connections ({established} established), {foreign} foreign, {total-foreign} domestic")
+        
+        # Show location info with detection method
+        location_info = self.country_detector.get_location_info()
+        print(f"🏠 Your location: {location_info}")
+        
+        # Show geo lookup methods being used
+        geo_methods = self.geoip.get_methods_summary()
+        cache_size = len(self.geoip.persistent_cache)
+        print(f"🗺️  Geo sources: {geo_methods} | Cache: {cache_size} entries")
     
     def monitor_continuous(self, refresh_interval: int = 5, filter_listening: bool = True):
         """Monitor connections continuously"""
         try:
-            print("Starting continuous monitoring...")
+            print("🚀 Starting network monitoring...")
+            print("Press Ctrl+C to stop\n")
+            
             while True:
                 try:
                     os.system('cls' if os.name == 'nt' else 'clear')
+                    print("🖥️  Network Connection Monitor")
+                    print("=" * 40)
+                    
                     connections = self.get_netstat_connections(filter_listening)
                     
                     if connections:
@@ -737,20 +887,52 @@ class NetworkMonitor:
                     else:
                         print("No active connections found.")
                         if self.local_country:
-                            print(f"Your location: {self.local_country}")
+                            print(f"🏠 Your location: {self.local_country}")
                     
-                    filter_text = " (no listening)" if filter_listening else ""
-                    print(f"\nRefreshing every {refresh_interval}s{filter_text} - Press Ctrl+C to stop")
+                    filter_text = " (excluding listening)" if filter_listening else ""
+                    print(f"\n⏱️  Refreshing every {refresh_interval}s{filter_text} - Press Ctrl+C to stop")
                     
                     time.sleep(refresh_interval)
                 except KeyboardInterrupt:
-                    print("\nMonitoring stopped by user")
+                    print("\n👋 Monitoring stopped by user")
                     break
                 except Exception as e:
-                    print(f"Error during monitoring iteration: {e}")
+                    self.logger.error(f"Error during monitoring iteration: {e}")
+                    print(f"⚠ Error occurred, retrying in {refresh_interval}s...")
                     time.sleep(refresh_interval)  # Wait before retrying
         except Exception as e:
-            print(f"Error in continuous monitoring: {e}")
+            self.logger.error(f"Error in continuous monitoring: {e}")
+
+
+def setup_logging(debug: bool = False, log_file: Optional[str] = None):
+    """Setup logging configuration"""
+    level = logging.DEBUG if debug else logging.WARNING
+    
+    # Create logger
+    logger = logging.getLogger()
+    logger.setLevel(level)
+    
+    # Clear any existing handlers
+    logger.handlers.clear()
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # Add file handler if specified
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    
+    # Add console handler only if debug mode
+    if debug:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(level)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+    
+    return logger
 
 
 def main():
@@ -772,24 +954,29 @@ def main():
     parser.add_argument("--no-online", action="store_true",
                        help="Disable online geo lookup (use only local databases)")
     parser.add_argument("--debug", action="store_true",
-                       help="Enable debug output")
+                       help="Enable debug output to console")
+    parser.add_argument("--log-file", help="Save debug logs to file")
     
     args = parser.parse_args()
     
-    print("Cross-Platform Network Monitor")
+    # Setup logging
+    logger = setup_logging(args.debug, args.log_file)
+    
+    print("🖥️  Network Connection Monitor")
     print("=" * 40)
     
     try:
         # Initialize GeoIP lookup
-        geoip = GeoIPLookup(args.city_db, args.asn_db, use_online=not args.no_online)
+        geoip = GeoIPLookup(args.city_db, args.asn_db, use_online=not args.no_online, logger=logger)
         
         # Initialize monitor
-        monitor = NetworkMonitor(geoip, args.default_country)
+        monitor = NetworkMonitor(geoip, args.default_country, logger)
         
         # Override country if specified
         if args.country:
+            monitor.country_detector.set_manual_country(args.country)
             monitor.local_country = args.country
-            print(f"Using specified country: {args.country}")
+            print(f"🌍 Using specified country: {args.country}")
         else:
             monitor.initialize()
         
@@ -797,20 +984,19 @@ def main():
         
         if args.file:
             # Parse file mode
-            print("File parsing mode not implemented yet")
+            print("📁 File parsing mode not implemented yet")
         else:
             # Continuous monitoring mode
-            filter_text = " (filtering out listening connections)" if filter_listening else ""
-            print(f"Starting network monitoring{filter_text}...")
-            print("Press Ctrl+C to stop")
             monitor.monitor_continuous(args.interval, filter_listening)
             
     except KeyboardInterrupt:
-        print("\nMonitoring stopped by user")
+        print("\n👋 Monitoring stopped by user")
     except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Fatal error: {e}")
+        print(f"❌ Error: {e}")
+        if args.debug:
+            import traceback
+            traceback.print_exc()
     finally:
         try:
             geoip.close()

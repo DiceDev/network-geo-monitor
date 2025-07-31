@@ -119,6 +119,166 @@ class GeoIPLookup:
         if self.asn_reader:
             self.asn_reader.close()
 
+class ModernNetstat:
+    """Uses 'ss' command as modern alternative to netstat"""
+    
+    def __init__(self):
+        self.available = self._check_ss_available()
+    
+    def _check_ss_available(self) -> bool:
+        """Check if ss command is available"""
+        try:
+            subprocess.run(['ss', '--version'], capture_output=True, check=True)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+    
+    def get_connections(self, connection_type: ConnectionType, filter_listening: bool = False) -> List[NetworkConnection]:
+        """Get connections using ss command"""
+        if not self.available:
+            return []
+        
+        connections = []
+        
+        try:
+            # ss command options:
+            # -t = TCP, -u = UDP, -l = listening, -n = numeric, -p = show process
+            if connection_type == ConnectionType.TCP:
+                cmd = ['ss', '-tnp'] if not filter_listening else ['ss', '-tlnp']
+            else:  # UDP
+                cmd = ['ss', '-unp'] if not filter_listening else ['ss', '-ulnp']
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            
+            # Parse ss output
+            lines = result.stdout.splitlines()
+            
+            # Skip header line
+            for line in lines[1:]:
+                parts = line.split()
+                if len(parts) >= 5:
+                    # ss format: State Recv-Q Send-Q Local-Address:Port Peer-Address:Port Process
+                    state = parts[0] if connection_type == ConnectionType.TCP else ""
+                    local_addr = parts[3]
+                    foreign_addr = parts[4]
+                    process_info = parts[5] if len(parts) > 5 else ""
+                    
+                    # Extract PID from process info (format: users:(("process",pid=1234,fd=5)))
+                    pid = ""
+                    if process_info and "pid=" in process_info:
+                        try:
+                            pid_start = process_info.find("pid=") + 4
+                            pid_end = process_info.find(",", pid_start)
+                            if pid_end == -1:
+                                pid_end = process_info.find(")", pid_start)
+                            pid = process_info[pid_start:pid_end]
+                        except:
+                            pass
+                    
+                    conn = NetworkConnection(
+                        protocol=connection_type.value.upper(),
+                        local_address=local_addr,
+                        foreign_address=foreign_addr,
+                        state=state,
+                        pid=pid
+                    )
+                    connections.append(conn)
+                    
+        except subprocess.CalledProcessError as e:
+            print(f"Error running ss command: {e}")
+        except Exception as e:
+            print(f"Error parsing ss output: {e}")
+            
+        return connections
+
+class CrossPlatformNetstat:
+    """Cross-platform netstat wrapper with ss fallback"""
+    
+    def __init__(self):
+        self.os_type = self._detect_os()
+        self.netstat_available = self._check_netstat_available()
+        self.modern_netstat = ModernNetstat() if not self.netstat_available else None
+        
+        if not self.netstat_available and self.modern_netstat and self.modern_netstat.available:
+            print("ℹ️  Using 'ss' command (netstat not available)")
+        elif not self.netstat_available:
+            print("⚠️  Neither netstat nor ss available - limited functionality")
+    
+    def _check_netstat_available(self) -> bool:
+        """Check if netstat command is available"""
+        try:
+            subprocess.run(['netstat', '--version'], capture_output=True, check=True)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            try:
+                # Try without --version flag (some systems don't support it)
+                subprocess.run(['netstat'], capture_output=True, timeout=1)
+                return True
+            except:
+                return False
+    
+    def get_connections(self, connection_type: ConnectionType, filter_listening: bool = False) -> List[NetworkConnection]:
+        """Get network connections using available method"""
+        if self.netstat_available:
+            return self._get_netstat_connections(connection_type, filter_listening)
+        elif self.modern_netstat and self.modern_netstat.available:
+            return self.modern_netstat.get_connections(connection_type, filter_listening)
+        else:
+            print("❌ No network monitoring tools available")
+            return []
+
+    def _detect_os(self) -> str:
+        """Detect the operating system"""
+        return sys.platform
+
+    def _get_netstat_connections(self, connection_type: ConnectionType, filter_listening: bool = False) -> List[NetworkConnection]:
+        """Get network connections using netstat"""
+        connections = []
+        
+        try:
+            cmd = ['netstat', '-ano', '-p', connection_type.value]
+            if filter_listening:
+                cmd.append('-l')
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            
+            # Parse netstat output
+            lines = result.stdout.splitlines()
+            
+            # Skip header lines
+            data_lines = [line for line in lines if line.strip() and 
+                         not line.startswith('Active') and not line.startswith('Proto')]
+            
+            for line in data_lines:
+                parts = line.split()
+                if len(parts) >= 4:
+                    if connection_type == ConnectionType.TCP and len(parts) >= 5:
+                        conn = NetworkConnection(
+                            protocol=parts[0],
+                            local_address=parts[1],
+                            foreign_address=parts[2],
+                            state=parts[3],
+                            pid=parts[4]
+                        )
+                    elif connection_type == ConnectionType.UDP and len(parts) >= 4:
+                        conn = NetworkConnection(
+                            protocol=parts[0],
+                            local_address=parts[1],
+                            foreign_address=parts[2],
+                            state="",  # UDP doesn't have state
+                            pid=parts[3]
+                        )
+                    else:
+                        continue
+                    
+                    connections.append(conn)
+                    
+        except subprocess.CalledProcessError as e:
+            print(f"Error running netstat: {e}")
+        except Exception as e:
+            print(f"Error parsing netstat output: {e}")
+            
+        return connections
+
 
 class NetworkMonitor:
     """Main network monitoring class"""
@@ -126,16 +286,17 @@ class NetworkMonitor:
     def __init__(self, geoip_lookup: GeoIPLookup):
         self.geoip = geoip_lookup
         self.console = Console() if RICH_AVAILABLE else None
+        self.netstat = CrossPlatformNetstat()
     
     def get_netstat_connections(self) -> List[NetworkConnection]:
         """Get network connections using netstat"""
         connections = []
         
         # Get TCP connections
-        connections.extend(self._get_connections_by_protocol(ConnectionType.TCP))
+        connections.extend(self.netstat.get_connections(ConnectionType.TCP))
         
         # Get UDP connections  
-        connections.extend(self._get_connections_by_protocol(ConnectionType.UDP))
+        connections.extend(self.netstat.get_connections(ConnectionType.UDP))
         
         return connections
     

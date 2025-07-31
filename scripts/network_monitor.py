@@ -695,27 +695,27 @@ class CrossPlatformNetworkTools:
         return connections
     
     def _get_unix_connections(self, protocol: ConnectionType, filter_listening: bool = True) -> List[NetworkConnection]:
-        """Get connections on Unix/Linux/macOS using netstat or ss as fallback"""
+        """Get connections on Unix/Linux/macOS using ss or netstat as fallback"""
         connections = []
         
-        # Try netstat first if available
-        if 'netstat' in self.available_tools:
-            try:
-                return self._get_unix_netstat_connections(protocol, filter_listening)
-            except Exception as e:
-                self.logger.warning(f"netstat failed, trying ss: {e}")
-        
-        # Try ss as fallback if available
+        # Try ss first if available (more modern)
         if 'ss' in self.available_tools:
             try:
                 return self._get_unix_ss_connections(protocol, filter_listening)
             except Exception as e:
-                self.logger.error(f"ss also failed: {e}")
+                self.logger.warning(f"ss failed, trying netstat: {e}")
+        
+        # Try netstat as fallback if available
+        if 'netstat' in self.available_tools:
+            try:
+                return self._get_unix_netstat_connections(protocol, filter_listening)
+            except Exception as e:
+                self.logger.error(f"netstat also failed: {e}")
         
         # If neither tool is available
         if not self.available_tools:
-            self.logger.error("Neither netstat nor ss is available")
-            raise Exception("No network tools available (netstat or ss required)")
+            self.logger.error("Neither ss nor netstat is available")
+            raise Exception("No network tools available (ss or netstat required)")
         
         return connections
 

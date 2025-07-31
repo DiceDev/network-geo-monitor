@@ -1,4 +1,92 @@
-# Network Monitor Usage Guide
+# Network Geo Monitor - Enhanced Unix Version
+
+This is the enhanced version of the network monitor with improved Unix support and `ss` tool integration.
+
+## Key Improvements
+
+### 🔧 Enhanced Network Tool Support
+- **Primary tool on Unix**: `ss` (modern, faster)
+- **Backup tool**: `netstat` (traditional, widely available)
+- **Windows**: `netstat` (built-in)
+- **Automatic detection and fallback**
+
+### 🌍 Better Geo Location
+- **Auto-country detection** - automatically detects your location
+- **Multiple lookup methods** with intelligent fallbacks
+- **Persistent caching** for faster repeated lookups
+- **Built-in geo database** - works without external dependencies
+
+### 🎯 Smart Filtering
+- **Filters uninteresting connections** by default
+- **Configurable listening connection display**
+- **Better connection state detection**
+- **Cross-platform compatibility**
+
+## Quick Start
+
+\`\`\`bash
+# Basic usage (recommended)
+python3 scripts/network_monitor.py
+
+# Include listening connections
+python3 scripts/network_monitor.py --show-listening
+
+# Set specific country
+python3 scripts/network_monitor.py --country "Germany"
+
+# Debug mode
+python3 scripts/network_monitor.py --debug
+\`\`\`
+
+## Tool Priority
+
+**Unix/Linux systems:**
+1. `ss` (primary) - Modern, efficient
+2. `netstat` (fallback) - Traditional, widely available
+
+**Windows systems:**
+- `netstat` (built-in)
+
+**macOS systems:**
+1. `ss` (if available)
+2. `netstat` (built-in)
+
+## Testing
+
+\`\`\`bash
+# Test ss tool integration
+python3 scripts/test_ss_tool.py
+
+# Test all geo lookup methods
+python3 scripts/test_all_geo.py
+
+# Basic functionality test
+python3 scripts/test_basic.py
+\`\`\`
+
+## Files Updated
+
+- `scripts/network_monitor.py` - Main script with ss priority
+- `scripts/test_ss_tool.py` - ss tool testing
+- `USAGE_GUIDE.md` - Updated documentation
+- `QUICK_START.md` - Enhanced setup guide
+
+## Merge Notes
+
+This version maintains backward compatibility while prioritizing modern tools. The `ss` command provides:
+
+- **Better performance** on modern Linux systems
+- **More detailed process information** (when run with privileges)
+- **Consistent output format** across distributions
+- **Active development and support**
+
+Falls back gracefully to `netstat` when `ss` is not available.
+\`\`\`
+
+Let's also update the usage guide to reflect the new priority:
+
+```typescriptreact file="USAGE_GUIDE.md"
+[v0-no-op-code-block-prefix]# Network Monitor Usage Guide
 
 ## 🚀 Quick Start
 

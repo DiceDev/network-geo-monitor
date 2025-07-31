@@ -273,7 +273,7 @@ class GeoIPLookup:
             'HR': 'Croatia', 'SI': 'Slovenia', 'SK': 'Slovakia', 'LT': 'Lithuania', 'LV': 'Latvia',
             'EE': 'Estonia', 'RU': 'Russia', 'UA': 'Ukraine', 'BY': 'Belarus', 'JP': 'Japan',
             'CN': 'China', 'KR': 'South Korea', 'IN': 'India', 'AU': 'Australia', 'NZ': 'New Zealand',
-            'BR': 'Brazil', 'MX': 'Mexico', 'Argentina', 'CL': 'Chile', 'CO': 'Colombia',
+            'BR': 'Brazil', 'MX': 'Mexico', 'AR': 'Argentina', 'CL': 'Chile', 'CO': 'Colombia',
             'PE': 'Peru', 'VE': 'Venezuela', 'ZA': 'South Africa', 'EG': 'Egypt', 'NG': 'Nigeria',
             'KE': 'Kenya', 'MA': 'Morocco', 'TN': 'Tunisia', 'IL': 'Israel', 'TR': 'Turkey',
             'SA': 'Saudi Arabia', 'AE': 'United Arab Emirates', 'QA': 'Qatar', 'KW': 'Kuwait',
@@ -865,8 +865,6 @@ class NetworkMonitor:
         self.country_detector = CountryDetector(geoip_lookup, default_country, logger)
         self.local_country = None
         self.logger = logger or logging.getLogger(__name__)
-        self.no_clear = False
-        self.refresh_rate = 1.0
     
     def initialize(self):
         """Initialize the monitor and detect local country"""
@@ -1004,223 +1002,40 @@ class NetworkMonitor:
         cache_size = len(self.geoip.persistent_cache)
         print(f"🗺️  Geo sources: {geo_methods} | Cache: {cache_size} entries")
     
-    def display_connections_live(self, connections: List[NetworkConnection]):
-        """Display connections using Rich Live for smooth updates"""
-        if not RICH_AVAILABLE:
-            return self.display_connections_simple(connections)
-        
-        # Get terminal width to adjust table size
-        console_width = self.console.size.width if self.console else 120
-        
-        # Create table with dynamic sizing
-        table = Table(show_header=True, header_style="bold magenta", show_lines=False, width=console_width)
-        table.add_column("Proto", width=5, no_wrap=True)
-        table.add_column("Local Address", width=22, no_wrap=False)
-        table.add_column("Remote Address", width=22, no_wrap=False)
-        table.add_column("State", width=11, no_wrap=True)
-        table.add_column("PID", width=6, no_wrap=True)
-        table.add_column("City", width=15, no_wrap=False)
-        table.add_column("Country", width=15, no_wrap=False)
-        table.add_column("Organization", min_width=20, no_wrap=False)
-        
-        for conn in connections:
-            style = "red" if conn.is_foreign(self.local_country) else "white"
-            
-            table.add_row(
-                conn.protocol,
-                conn.local_address,
-                conn.foreign_address,
-                conn.state,
-                conn.pid,
-                conn.city,
-                conn.country,
-                conn.asn,
-                style=style
-            )
-        
-        return table
-
-    def create_status_panel(self, connections: List[NetworkConnection], filter_text: str, refresh_interval: int):
-        """Create status information panel"""
-        if not RICH_AVAILABLE:
-            return ""
-        
-        from rich.panel import Panel
-        from rich.columns import Columns
-        from rich.text import Text
-        
-        # Enhanced summary with location and geo source info
-        total = len(connections)
-        foreign = sum(1 for conn in connections if conn.is_foreign(self.local_country))
-        established = sum(1 for conn in connections if conn.is_established())
-        
-        # Create status text
-        summary_text = Text()
-        summary_text.append("📊 Summary: ", style="bold")
-        summary_text.append(f"{total} connections ({established} established), {foreign} foreign, {total-foreign} domestic\n")
-        
-        # Show location info with detection method
-        location_info = self.country_detector.get_location_info()
-        summary_text.append("🏠 Your location: ", style="bold")
-        summary_text.append(f"{location_info}\n")
-        
-        # Show geo lookup methods being used
-        geo_methods = self.geoip.get_methods_summary()
-        cache_size = len(self.geoip.persistent_cache)
-        summary_text.append("🗺️  Geo sources: ", style="bold")
-        summary_text.append(f"{geo_methods} | Cache: {cache_size} entries\n")
-        
-        # Refresh info
-        summary_text.append("⏱️  ", style="bold")
-        summary_text.append(f"Refreshing every {refresh_interval}s{filter_text} - Press Ctrl+C to stop")
-        
-        return Panel(summary_text, title="🖥️  Network Connection Monitor", border_style="blue")
-    
-    def display_connections_smooth(self, connections: List[NetworkConnection]):
-        """Display connections with minimal screen clearing"""
-        # Calculate required lines for output
-        header_lines = 3  # Title + separator + header
-        connection_lines = len(connections)
-        summary_lines = 4  # Summary info
-        total_lines = header_lines + connection_lines + summary_lines
-        
-        # Move cursor up to overwrite previous output
-        if hasattr(self, '_last_output_lines'):
-            print(f"\033[{self._last_output_lines}A", end="")  # Move cursor up
-        
-        # Display content
-        print("🖥️  Network Connection Monitor")
-        print("=" * 40)
-        
-        if connections:
-            self.display_connections_simple(connections)
-        else:
-            print("No active connections found.")
-            if self.local_country:
-                print(f"🏠 Your location: {self.local_country}")
-        
-        # Clear any remaining lines from previous output
-        print("\033[J", end="")  # Clear from cursor to end of screen
-        
-        # Remember how many lines we output
-        self._last_output_lines = total_lines
-
-    def _count_display_lines(self, connections: List[NetworkConnection]) -> int:
-        """Count how many lines the display will use"""
-        lines = 0
-        lines += 2  # Title and separator
-        lines += 2  # Header and separator line
-        lines += len(connections)  # Connection lines
-        lines += 5  # Summary and status info
-        return lines
-    
     def monitor_continuous(self, refresh_interval: int = 5, filter_listening: bool = True):
-        """Monitor connections continuously with smooth updates"""
+        """Monitor connections continuously"""
         try:
             print("🚀 Starting network monitoring...")
             print("Press Ctrl+C to stop\n")
-        
-            filter_text = " (excluding listening)" if filter_listening else ""
-        
-            if RICH_AVAILABLE:
-                # Use Rich Live for smooth updates
-                from rich.live import Live
-                from rich.layout import Layout
-                from rich.console import Group
             
-                with Live(console=self.console, refresh_per_second=self.refresh_rate, screen=False) as live:
-                    while True:
-                        try:
-                            connections = self.get_netstat_connections(filter_listening)
-                        
-                            if connections:
-                                # Create table and status panel
-                                table = self.display_connections_live(connections)
-                                status_panel = self.create_status_panel(connections, filter_text, refresh_interval)
-                            
-                                # Combine them
-                                display_group = Group(status_panel, "", table)
-                                live.update(display_group)
-                            else:
-                                # Show no connections message
-                                from rich.text import Text
-                                no_conn_text = Text("No active connections found.", style="yellow")
-                                if self.local_country:
-                                    no_conn_text.append(f"\n🏠 Your location: {self.local_country}")
-                            
-                                status_panel = self.create_status_panel([], filter_text, refresh_interval)
-                                display_group = Group(status_panel, "", no_conn_text)
-                                live.update(display_group)
-                        
-                            time.sleep(refresh_interval)
-                        except KeyboardInterrupt:
-                            break
-                        except Exception as e:
-                            self.logger.error(f"Error during monitoring iteration: {e}")
-                            error_text = Text(f"⚠ Error occurred, retrying in {refresh_interval}s...", style="red")
-                            live.update(error_text)
-                            time.sleep(refresh_interval)
-            else:
-                # Fallback to ANSI cursor positioning for smooth updates without Rich
-                self._monitor_with_ansi_updates(refresh_interval, filter_listening)
-            
-            print("\n👋 Monitoring stopped by user")
-        
-        except Exception as e:
-            self.logger.error(f"Error in continuous monitoring: {e}")
-
-    def _monitor_with_ansi_updates(self, refresh_interval: int, filter_listening: bool):
-        """Monitor with ANSI escape sequences for smooth updates without Rich"""
-        import sys
-    
-        filter_text = " (excluding listening)" if filter_listening else ""
-    
-        # ANSI escape sequences
-        CLEAR_SCREEN = '\033[2J'
-        CURSOR_HOME = '\033[H'
-        HIDE_CURSOR = '\033[?25l'
-        SHOW_CURSOR = '\033[?25h'
-    
-        try:
-            # Hide cursor and clear screen once
-            sys.stdout.write(HIDE_CURSOR + CLEAR_SCREEN)
-            sys.stdout.flush()
-        
             while True:
                 try:
-                    # Move cursor to home position instead of clearing
-                    sys.stdout.write(CURSOR_HOME)
-                    sys.stdout.flush()
-                
+                    os.system('cls' if os.name == 'nt' else 'clear')
                     print("🖥️  Network Connection Monitor")
                     print("=" * 40)
-                
+                    
                     connections = self.get_netstat_connections(filter_listening)
-                
+                    
                     if connections:
-                        self.display_connections_simple(connections)
+                        self.display_connections_rich(connections)
                     else:
                         print("No active connections found.")
                         if self.local_country:
                             print(f"🏠 Your location: {self.local_country}")
-                
+                    
+                    filter_text = " (excluding listening)" if filter_listening else ""
                     print(f"\n⏱️  Refreshing every {refresh_interval}s{filter_text} - Press Ctrl+C to stop")
-                
-                    # Clear any remaining lines from previous output
-                    print("\033[J", end="")  # Clear from cursor to end of screen
-                    sys.stdout.flush()
-                
+                    
                     time.sleep(refresh_interval)
                 except KeyboardInterrupt:
+                    print("\n👋 Monitoring stopped by user")
                     break
                 except Exception as e:
                     self.logger.error(f"Error during monitoring iteration: {e}")
                     print(f"⚠ Error occurred, retrying in {refresh_interval}s...")
-                    time.sleep(refresh_interval)
-        finally:
-            # Show cursor again
-            sys.stdout.write(SHOW_CURSOR)
-            sys.stdout.flush()
+                    time.sleep(refresh_interval)  # Wait before retrying
+        except Exception as e:
+            self.logger.error(f"Error in continuous monitoring: {e}")
 
 
 def setup_logging(debug: bool = False, log_file: Optional[str] = None):
@@ -1275,10 +1090,6 @@ def main():
     parser.add_argument("--debug", action="store_true",
                        help="Enable debug output to console")
     parser.add_argument("--log-file", help="Save debug logs to file")
-    parser.add_argument("--no-clear", action="store_true",
-                   help="Don't clear screen on refresh (reduces flicker)")
-    parser.add_argument("--refresh-rate", type=float, default=1.0,
-                   help="Screen refresh rate for smooth updates (default: 1.0 Hz)")
     
     args = parser.parse_args()
     
@@ -1304,11 +1115,6 @@ def main():
             monitor.initialize()
         
         filter_listening = not args.show_listening
-        
-        if hasattr(args, 'no_clear') and args.no_clear:
-            monitor.no_clear = True
-        if hasattr(args, 'refresh_rate'):
-            monitor.refresh_rate = args.refresh_rate
         
         if args.file:
             # Parse file mode

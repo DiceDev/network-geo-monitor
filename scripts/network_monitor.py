@@ -15,6 +15,7 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import json
+import requests
 
 try:
     import geoip2.database
@@ -63,54 +64,159 @@ class NetworkConnection:
 
 
 class GeoIPLookup:
-    """Handles GeoIP database operations"""
+    """Handles GeoIP database operations with multiple fallback methods"""
     
     def __init__(self, city_db_path: str = "./GeoLite2-City.mmdb", 
                  asn_db_path: str = "./GeoLite2-ASN.mmdb"):
         self.city_reader = None
         self.asn_reader = None
+        self.cache = {}  # Simple cache for API lookups
+        self.api_calls_made = 0
+        self.max_api_calls = 100  # Rate limiting
         
+        # Try to initialize MaxMind databases first
+        self._init_maxmind_dbs(city_db_path, asn_db_path)
+        
+        # If MaxMind not available, we'll use fallback methods
+        if not self.city_reader and not self.asn_reader:
+            print("ℹ️  MaxMind databases not available - using online fallback methods")
+    
+    def _init_maxmind_dbs(self, city_db_path: str, asn_db_path: str):
+        """Initialize MaxMind databases if available"""
         if not GEOIP_AVAILABLE:
-            print("GeoIP2 not available - geographic data will be empty")
             return
             
         try:
             if Path(city_db_path).exists():
                 self.city_reader = geoip2.database.Reader(city_db_path)
-            else:
-                print(f"Warning: City database not found at {city_db_path}")
-                
+                print(f"✓ Loaded MaxMind City database: {city_db_path}")
+            
             if Path(asn_db_path).exists():
                 self.asn_reader = geoip2.database.Reader(asn_db_path)
-            else:
-                print(f"Warning: ASN database not found at {asn_db_path}")
+                print(f"✓ Loaded MaxMind ASN database: {asn_db_path}")
                 
         except Exception as e:
-            print(f"Error initializing GeoIP databases: {e}")
+            print(f"Warning: Error loading MaxMind databases: {e}")
+    
+    def _lookup_online_ipapi(self, ip_address: str) -> Tuple[str, str, str]:
+        """Lookup using ip-api.com (free, no key required)"""
+        try:
+            import requests
+            
+            if self.api_calls_made >= self.max_api_calls:
+                return "", "", ""
+            
+            url = f"http://ip-api.com/json/{ip_address}?fields=city,country,org"
+            response = requests.get(url, timeout=5)
+            self.api_calls_made += 1
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('status') == 'success':
+                    city = data.get('city', '')
+                    country = data.get('country', '')
+                    asn = data.get('org', '')
+                    return city, country, asn
+                    
+        except Exception as e:
+            print(f"Warning: Online lookup failed: {e}")
+        
+        return "", "", ""
+    
+    def _lookup_builtin_ranges(self, ip_address: str) -> Tuple[str, str, str]:
+        """Basic lookup using known IP ranges"""
+        try:
+            import ipaddress
+            ip = ipaddress.ip_address(ip_address)
+            
+            # Private/local ranges
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                return "Local", "Local Network", "Private"
+            
+            # Some basic country detection based on known ranges
+            # This is very limited but better than nothing
+            ip_int = int(ip)
+            
+            # Some basic ranges (this is very simplified)
+            if 0x08000000 <= ip_int <= 0x08FFFFFF:  # 8.0.0.0/8 (Google DNS, US)
+                return "Mountain View", "United States", "Google LLC"
+            elif 0x01010100 <= ip_int <= 0x010101FF:  # 1.1.1.0/24 (Cloudflare DNS)
+                return "San Francisco", "United States", "Cloudflare"
+            elif 0x4A7D0000 <= ip_int <= 0x4A7DFFFF:  # 74.125.0.0/16 (Google)
+                return "Mountain View", "United States", "Google LLC"
+            
+            # Default for unknown public IPs
+            return "", "Unknown", "Unknown ISP"
+            
+        except Exception:
+            return "", "", ""
     
     def lookup(self, ip_address: str) -> Tuple[str, str, str]:
         """Lookup geographic and ASN information for an IP address"""
+        if not ip_address or ip_address in ['0.0.0.0', '127.0.0.1', '::1', '*']:
+            return "", "", ""
+        
+        # Check cache first
+        if ip_address in self.cache:
+            return self.cache[ip_address]
+        
         city, country, asn = "", "", ""
         
-        if not ip_address or ip_address in ['0.0.0.0', '127.0.0.1', '::1']:
-            return city, country, asn
-            
-        try:
-            if self.city_reader:
-                response = self.city_reader.city(ip_address)
-                city = response.city.name or ""
-                country = response.country.name or ""
-                
-            if self.asn_reader:
-                response_asn = self.asn_reader.asn(ip_address)
-                asn = response_asn.autonomous_system_organization or ""
-                
-        except (geoip2.errors.AddressNotFoundError, geoip2.errors.GeoIP2Error):
-            pass  # IP not found in database
-        except Exception as e:
-            print(f"Error looking up {ip_address}: {e}")
-            
-        return city, country, asn
+        # Method 1: Try MaxMind databases
+        if self.city_reader or self.asn_reader:
+            try:
+                if self.city_reader:
+                    response = self.city_reader.city(ip_address)
+                    city = response.city.name or ""
+                    country = response.country.name or ""
+                    
+                if self.asn_reader:
+                    response_asn = self.asn_reader.asn(ip_address)
+                    asn = response_asn.autonomous_system_organization or ""
+                    
+                if city or country or asn:
+                    result = (city, country, asn)
+                    self.cache[ip_address] = result
+                    return result
+                    
+            except (geoip2.errors.AddressNotFoundError, geoip2.errors.GeoIP2Error):
+                pass  # Try next method
+            except Exception as e:
+                print(f"MaxMind lookup error for {ip_address}: {e}")
+        
+        # Method 2: Try online API (with rate limiting)
+        if self.api_calls_made < self.max_api_calls:
+            city, country, asn = self._lookup_online_ipapi(ip_address)
+            if city or country or asn:
+                result = (city, country, asn)
+                self.cache[ip_address] = result
+                return result
+        
+        # Method 3: Basic built-in ranges
+        city, country, asn = self._lookup_builtin_ranges(ip_address)
+        result = (city, country, asn)
+        self.cache[ip_address] = result
+        return result
+    
+    def get_lookup_stats(self) -> Dict[str, any]:
+        """Get statistics about lookups performed"""
+        return {
+            "cache_size": len(self.cache),
+            "api_calls_made": self.api_calls_made,
+            "max_api_calls": self.max_api_calls,
+            "maxmind_available": bool(self.city_reader or self.asn_reader),
+            "methods_available": self._get_available_methods()
+        }
+    
+    def _get_available_methods(self) -> List[str]:
+        """Get list of available lookup methods"""
+        methods = []
+        if self.city_reader or self.asn_reader:
+            methods.append("MaxMind")
+        if self.api_calls_made < self.max_api_calls:
+            methods.append("Online API")
+        methods.append("Built-in ranges")
+        return methods
     
     def close(self):
         """Close database connections"""
@@ -480,16 +586,28 @@ def main():
     parser.add_argument("--interval", type=int, default=5,
                        help="Refresh interval in seconds for continuous monitoring")
     parser.add_argument("--export", help="Export results to JSON file")
+    parser.add_argument("--stats", action="store_true", help="Show lookup statistics")
     
     args = parser.parse_args()
     
     # Initialize GeoIP lookup
     geoip = GeoIPLookup(args.city_db, args.asn_db)
     
+    # Show available lookup methods
+    stats = geoip.get_lookup_stats()
+    print(f"🌍 Geographic lookup methods: {', '.join(stats['methods_available'])}")
+    
     # Initialize monitor
     monitor = NetworkMonitor(geoip)
     
     try:
+        if args.stats:
+            # Show detailed statistics
+            print("\n📊 Lookup Statistics:")
+            for key, value in stats.items():
+                print(f"  {key}: {value}")
+            return
+            
         if args.file:
             # Parse file mode
             connections = monitor.parse_file_connections(args.file)
@@ -520,6 +638,13 @@ def main():
             
     except KeyboardInterrupt:
         print("\nMonitoring stopped by user")
+        
+        # Show final statistics
+        final_stats = geoip.get_lookup_stats()
+        print(f"\n📊 Final Statistics:")
+        print(f"  Cached lookups: {final_stats['cache_size']}")
+        print(f"  API calls made: {final_stats['api_calls_made']}")
+        
     except Exception as e:
         print(f"Error: {e}")
     finally:

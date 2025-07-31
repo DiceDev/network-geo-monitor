@@ -50,6 +50,56 @@ python network_monitor.py --no-online
 - **Better classification** of private vs public IPs
 - **More accurate ASN information**
 
+## 🛠️ Network Tool Support
+
+### Automatic Tool Detection
+The monitor automatically detects and uses available network tools:
+
+**Windows:**
+- Uses `netstat -ano` (built-in)
+
+**Linux/Unix:**
+- **Primary:** `netstat -ant` / `netstat -anu`
+- **Backup:** `ss -ant` / `ss -anu` (if netstat unavailable)
+- **Enhanced:** `ss -antp` / `ss -anup` (with process info if root)
+
+**macOS:**
+- Uses `netstat -an -p tcp` / `netstat -an -p udp`
+
+### Tool Availability
+- ✅ **netstat**: Available on most systems by default
+- ✅ **ss**: Modern replacement, common on newer Linux distributions
+- 🔄 **Automatic fallback**: If netstat fails, automatically tries ss
+- ⚡ **Process info**: Shows PID when available (may require elevated privileges)
+
+### Troubleshooting Network Tools
+If you see "No network tools available":
+
+**Install netstat:**
+\`\`\`bash
+# Ubuntu/Debian
+sudo apt install net-tools
+
+# CentOS/RHEL/Fedora
+sudo yum install net-tools
+# or
+sudo dnf install net-tools
+
+# Alpine Linux
+sudo apk add net-tools
+\`\`\`
+
+**ss is usually pre-installed on modern Linux, but if needed:**
+\`\`\`bash
+# Ubuntu/Debian
+sudo apt install iproute2
+
+# CentOS/RHEL/Fedora
+sudo yum install iproute
+# or  
+sudo dnf install iproute
+\`\`\`
+
 ## 📊 Display Format
 
 \`\`\`

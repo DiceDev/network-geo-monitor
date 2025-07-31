@@ -24,6 +24,8 @@
 ## 🎯 Features
 
 - ✅ **Zero configuration** - works out of the box
+- ✅ **Multiple network tools** - netstat, ss (automatic detection)
+- ✅ **Cross-platform support** - Windows, Linux, macOS
 - ✅ **Multiple geo lookup methods** - local databases, online APIs, basic classification
 - ✅ **Automatic fallbacks** - if one method fails, tries another
 - ✅ **Color coding** - red for foreign connections, white for domestic

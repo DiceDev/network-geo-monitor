@@ -561,13 +561,15 @@ class GeoIPLookup:
             self.asn_reader.close()
 
 
-class CrossPlatformNetstat:
-    """Handles netstat across different operating systems"""
+class CrossPlatformNetworkTools:
+    """Handles network connection retrieval across different operating systems using netstat or ss"""
     
     def __init__(self, logger=None):
         self.os_type = self._detect_os()
         self.logger = logger or logging.getLogger(__name__)
+        self.available_tools = self._detect_available_tools()
         self.logger.info(f"Detected OS: {self.os_type.value}")
+        self.logger.info(f"Available network tools: {', '.join(self.available_tools)}")
     
     def _detect_os(self) -> OSType:
         """Detect the operating system"""
@@ -580,6 +582,37 @@ class CrossPlatformNetstat:
             return OSType.LINUX
         else:
             return OSType.UNKNOWN
+    
+    def _detect_available_tools(self) -> List[str]:
+        """Detect which network tools are available"""
+        tools = []
+        
+        # Check for netstat
+        try:
+            subprocess.run(['netstat', '--version'], capture_output=True, check=True, timeout=5)
+            tools.append('netstat')
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            try:
+                # Some systems don't support --version, try a simple command
+                subprocess.run(['netstat', '-h'], capture_output=True, timeout=5)
+                tools.append('netstat')
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+        
+        # Check for ss (only on non-Windows systems)
+        if self.os_type != OSType.WINDOWS:
+            try:
+                subprocess.run(['ss', '--version'], capture_output=True, check=True, timeout=5)
+                tools.append('ss')
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                try:
+                    # Some versions don't support --version
+                    subprocess.run(['ss', '-h'], capture_output=True, timeout=5)
+                    tools.append('ss')
+                except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
+        
+        return tools
     
     def get_connections(self, protocol: ConnectionType, filter_listening: bool = True) -> List[NetworkConnection]:
         """Get network connections for the current OS"""
@@ -662,7 +695,33 @@ class CrossPlatformNetstat:
         return connections
     
     def _get_unix_connections(self, protocol: ConnectionType, filter_listening: bool = True) -> List[NetworkConnection]:
-        """Get connections on Unix/Linux/macOS"""
+        """Get connections on Unix/Linux/macOS using netstat or ss as fallback"""
+        connections = []
+        
+        # Try netstat first if available
+        if 'netstat' in self.available_tools:
+            try:
+                return self._get_unix_netstat_connections(protocol, filter_listening)
+            except Exception as e:
+                self.logger.warning(f"netstat failed, trying ss: {e}")
+        
+        # Try ss as fallback if available
+        if 'ss' in self.available_tools:
+            try:
+                return self._get_unix_ss_connections(protocol, filter_listening)
+            except Exception as e:
+                self.logger.error(f"ss also failed: {e}")
+        
+        # If neither tool is available
+        if not self.available_tools:
+            self.logger.error("Neither netstat nor ss is available")
+            raise Exception("No network tools available (netstat or ss required)")
+        
+        return connections
+
+    
+    def _get_unix_netstat_connections(self, protocol: ConnectionType, filter_listening: bool = True) -> List[NetworkConnection]:
+        """Get connections using netstat on Unix systems"""
         connections = []
         
         try:
@@ -680,7 +739,7 @@ class CrossPlatformNetstat:
                 else:
                     cmd = ['netstat', '-anu']
             
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
             lines = result.stdout.splitlines()
             
             # Parse Unix netstat output
@@ -715,10 +774,85 @@ class CrossPlatformNetstat:
                         
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Error running Unix netstat: {e}")
+            raise
         except Exception as e:
             self.logger.error(f"Error parsing Unix netstat output: {e}")
+            raise
             
         return connections
+
+    def _get_unix_ss_connections(self, protocol: ConnectionType, filter_listening: bool = True) -> List[NetworkConnection]:
+    """Get connections using ss command on Linux systems"""
+    connections = []
+    
+    try:
+        # ss command options
+        if protocol == ConnectionType.TCP:
+            cmd = ['ss', '-ant']  # -a all, -n numeric, -t tcp
+        else:
+            cmd = ['ss', '-anu']  # -a all, -n numeric, -u udp
+        
+        # Add process info if available (requires root on some systems)
+        try:
+            # Test if we can get process info
+            test_cmd = cmd + ['-p']
+            test_result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=5)
+            if test_result.returncode == 0:
+                cmd.append('-p')  # Add process info if available
+        except:
+            pass  # Continue without process info
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        lines = result.stdout.splitlines()
+        
+        # Parse ss output
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith(('State', 'Netid', 'UNCONN', 'LISTEN')):
+                continue
+            
+            parts = line.split()
+            if len(parts) >= 5:
+                # ss format: State Recv-Q Send-Q Local-Address:Port Peer-Address:Port [Process]
+                state = parts[0] if protocol == ConnectionType.TCP else ""
+                local_addr = parts[3]
+                foreign_addr = parts[4]
+                
+                # Extract PID from process info if available
+                pid = ""
+                if len(parts) > 5 and 'pid=' in parts[5]:
+                    # Process format: users:(("process",pid=1234,fd=5))
+                    import re
+                    pid_match = re.search(r'pid=(\d+)', parts[5])
+                    if pid_match:
+                        pid = pid_match.group(1)
+                
+                conn = NetworkConnection(
+                    protocol=protocol.value.upper(),
+                    local_address=local_addr,
+                    foreign_address=foreign_addr,
+                    state=state,
+                    pid=pid
+                )
+                
+                # Filter out listening connections if requested
+                if filter_listening and (conn.is_listening() or state == 'LISTEN'):
+                    continue
+                    
+                # Filter out uninteresting connections
+                if conn.is_uninteresting():
+                    continue
+                    
+                connections.append(conn)
+                
+    except subprocess.CalledProcessError as e:
+        self.logger.error(f"Error running ss command: {e}")
+        raise
+    except Exception as e:
+        self.logger.error(f"Error parsing ss output: {e}")
+        raise
+        
+    return connections
 
 
 class NetworkMonitor:
@@ -727,7 +861,7 @@ class NetworkMonitor:
     def __init__(self, geoip_lookup: GeoIPLookup, default_country: str = "United States", logger=None):
         self.geoip = geoip_lookup
         self.console = Console() if RICH_AVAILABLE else None
-        self.netstat = CrossPlatformNetstat(logger)
+        self.nettools = CrossPlatformNetworkTools(logger)  # Changed from netstat to nettools
         self.country_detector = CountryDetector(geoip_lookup, default_country, logger)
         self.local_country = None
         self.logger = logger or logging.getLogger(__name__)
@@ -741,16 +875,16 @@ class NetworkMonitor:
             self.local_country = "United States"  # Fallback
     
     def get_netstat_connections(self, filter_listening: bool = True) -> List[NetworkConnection]:
-        """Get network connections using cross-platform netstat"""
+        """Get network connections using cross-platform network tools"""
         connections = []
         
         try:
             # Get TCP connections
-            tcp_connections = self.netstat.get_connections(ConnectionType.TCP, filter_listening)
+            tcp_connections = self.nettools.get_connections(ConnectionType.TCP, filter_listening)  # Changed from netstat to nettools
             connections.extend(tcp_connections)
             
             # Get UDP connections  
-            udp_connections = self.netstat.get_connections(ConnectionType.UDP, filter_listening)
+            udp_connections = self.nettools.get_connections(ConnectionType.UDP, filter_listening)  # Changed from netstat to nettools
             connections.extend(udp_connections)
             
             self.logger.info(f"Found {len(connections)} connections before geo lookup")
@@ -762,13 +896,13 @@ class NetworkMonitor:
                     conn.city = city
                     conn.country = country
                     conn.asn = asn
-                        
-                except Exception as e:
-                    self.logger.error(f"Error in geo lookup for {conn.foreign_ip}: {e}")
-                    conn.city = ""
-                    conn.country = "Lookup Error"
-                    conn.asn = "Lookup Error"
-            
+                    
+            except Exception as e:
+                self.logger.error(f"Error in geo lookup for {conn.foreign_ip}: {e}")
+                conn.city = ""
+                conn.country = "Lookup Error"
+                conn.asn = "Lookup Error"
+        
         except Exception as e:
             self.logger.error(f"Error getting connections: {e}")
         

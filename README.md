@@ -1,76 +1,30 @@
-# Network Connection Monitor
+# networkgeomonitormain1
 
-An enhanced Python script for monitoring network connections on Windows with geographical and ASN information lookup.
+*Automatically synced with your [v0.dev](https://v0.dev) deployments*
 
-## Features
+[![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?style=for-the-badge&logo=vercel)](https://vercel.com/clayandrew-2899s-projects/v0-networkgeomonitormain1)
+[![Built with v0](https://img.shields.io/badge/Built%20with-v0.dev-black?style=for-the-badge)](https://v0.dev/chat/projects/ifAUJzoflSf)
 
-- Monitor TCP and UDP connections in real-time
-- Geographic location lookup (city, country) for remote IP addresses
-- ASN (Autonomous System Number) information
-- Color-coded display (red for foreign connections, white for domestic/unknown)
-- File parsing mode for analyzing saved netstat output
-- JSON export functionality
-- Rich terminal UI with live updates
-- Configurable refresh intervals
+## Overview
 
-## Installation
+This repository will stay in sync with your deployed chats on [v0.dev](https://v0.dev).
+Any changes you make to your deployed app will be automatically pushed to this repository from [v0.dev](https://v0.dev).
 
-1. Install required dependencies:
-\`\`\`bash
-pip install -r requirements.txt
-\`\`\`
+## Deployment
 
-2. Download GeoLite2 databases from MaxMind:
-   - [GeoLite2 City](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)
-   - [GeoLite2 ASN](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)
-   
-   Place the `.mmdb` files in the same directory as the script.
+Your project is live at:
 
-3. If you don't use MaxMind, the script defaults to a combination of a simple local database and API calls for new IP's which are then cached.
+**[https://vercel.com/clayandrew-2899s-projects/v0-networkgeomonitormain1](https://vercel.com/clayandrew-2899s-projects/v0-networkgeomonitormain1)**
 
-## Usage
-The simplest way to start up the monitor and check for dependencies is with either .\run_monitor.bat or ./run_monitor.sh
+## Build your app
 
-### Live Monitoring
-\`\`\`bash
-python network_monitor.py
-\`\`\`
+Continue building your app on:
 
-### Monitor with custom interval
-\`\`\`bash
-python network_monitor.py --interval 10
-\`\`\`
+**[https://v0.dev/chat/projects/ifAUJzoflSf](https://v0.dev/chat/projects/ifAUJzoflSf)**
 
-### Parse a file
-\`\`\`bash
-python network_monitor.py connections.txt
-\`\`\`
+## How It Works
 
-### Export to JSON
-\`\`\`bash
-python network_monitor.py --export results.json
-\`\`\`
-
-### Custom database paths
-\`\`\`bash
-python network_monitor.py --city-db /path/to/city.mmdb --asn-db /path/to/asn.mmdb
-\`\`\`
-
-## Command Line Options
-
-- `file`: Optional file to parse instead of live monitoring
-- `--city-db`: Path to GeoLite2 City database (default: ./GeoLite2-City.mmdb)
-- `--asn-db`: Path to GeoLite2 ASN database (default: ./GeoLite2-ASN.mmdb)
-- `--interval`: Refresh interval in seconds (default: 5)
-- `--export`: Export results to JSON file
-
-## Requirements
-
-- Python 3.7+
-- Windows (uses netstat command)
-- GeoLite2 databases from MaxMind
-
-## Dependencies
-
-- `geoip2`: For IP geolocation lookup
-- `rich`: For enhanced terminal display (optional, falls back to simple text)
+1. Create and modify your project using [v0.dev](https://v0.dev)
+2. Deploy your chats from the v0 interface
+3. Changes are automatically pushed to this repository
+4. Vercel deploys the latest version from this repository
